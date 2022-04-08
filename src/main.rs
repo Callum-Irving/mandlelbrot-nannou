@@ -1,20 +1,59 @@
 #![feature(portable_simd)]
 use std::simd::*;
-
 use std::time::Instant;
 
-// use nannou::prelude::*;
+use pixels::{Pixels, SurfaceTexture};
+use winit::dpi::LogicalSize;
+use winit::event::Event;
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::window::WindowBuilder;
 
 const WIDTH: usize = 1000;
 const HEIGHT: usize = 1000;
 const MAX_ITERS: usize = 200;
 
 fn main() {
-    let mut iters = [0; WIDTH * HEIGHT];
+    let event_loop = EventLoop::new();
+
+    let window = {
+        let size = LogicalSize::new(WIDTH as f64, HEIGHT as f64);
+        WindowBuilder::new()
+            .with_title("Mandelbrot Set")
+            .with_inner_size(size)
+            .with_min_inner_size(size)
+            .build(&event_loop)
+            .unwrap()
+    };
+
+    let mut pixels = {
+        let window_size = window.inner_size();
+        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
+        Pixels::new(WIDTH as u32, HEIGHT as u32, surface_texture).unwrap()
+    };
 
     let scale = 1.0;
     let x_off = 0.0;
     let y_off = 0.0;
+
+    event_loop.run(move |event, _, control_flow| {
+        if let Event::RedrawRequested(_) = event {
+            // TODO: Draw Mandelbrot
+            draw_mandelbrot(pixels.get_frame(), scale, x_off, y_off);
+            // world.draw(pixels.get_frame());
+            if pixels
+                .render()
+                .map_err(|e| eprintln!("pixels.render() failed: {}", e))
+                .is_err()
+            {
+                *control_flow = ControlFlow::Exit;
+                return;
+            }
+        }
+    });
+}
+
+fn draw_mandelbrot(frame: &mut [u8], scale: f64, x_off: f64, y_off: f64) {
+    let mut iters = [0; WIDTH * HEIGHT];
 
     let scale_vec = f64x4::splat(scale);
     let x_off_vec = f64x4::splat(x_off);
@@ -64,7 +103,13 @@ fn main() {
         }
     }
 
-    let elapsed = start.elapsed();
+    for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
+        let n = iters[i];
+        // Convert n to rgb
+        let brightness: u8 = (n / MAX_ITERS as i64) as u8 * 255;
+        pixel.copy_from_slice(&[brightness, brightness, brightness, 0xFF]);
+    }
 
+    let elapsed = start.elapsed();
     println!("Finished in {} milliseconds.", elapsed.as_millis());
 }
