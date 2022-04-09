@@ -1,115 +1,140 @@
 #![feature(portable_simd)]
-use std::simd::*;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use std::{simd::*, thread};
 
-use pixels::{Pixels, SurfaceTexture};
-use winit::dpi::LogicalSize;
-use winit::event::Event;
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::WindowBuilder;
+use minifb::{Window, WindowOptions};
 
-const WIDTH: usize = 1000;
-const HEIGHT: usize = 1000;
-const MAX_ITERS: usize = 200;
+const WIDTH: usize = 1280;
+const HEIGHT: usize = 720;
+const MAX_ITERS: i64 = 500;
 
 fn main() {
-    let event_loop = EventLoop::new();
+    let mut buf = vec![0; WIDTH * HEIGHT];
+    let scale = 1000.0;
+    let x_off = -0.750222;
+    let y_off = -0.031161;
+    let mut colours = [0; MAX_ITERS as usize + 1];
+    colours[MAX_ITERS as usize] = 0x00FFFFFF;
 
-    let window = {
-        let size = LogicalSize::new(WIDTH as f64, HEIGHT as f64);
-        WindowBuilder::new()
-            .with_title("Mandelbrot Set")
-            .with_inner_size(size)
-            .with_min_inner_size(size)
-            .build(&event_loop)
-            .unwrap()
-    };
+    let start = Instant::now();
+    draw_mandelbrot(&mut buf, scale, x_off, y_off, colours);
+    let elapsed = start.elapsed();
+    println!("Finished in {} milliseconds.", elapsed.as_millis());
 
-    let mut pixels = {
-        let window_size = window.inner_size();
-        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        Pixels::new(WIDTH as u32, HEIGHT as u32, surface_texture).unwrap()
-    };
+    let start = Instant::now();
+    draw_mandelbrot_vectorized(&mut buf, scale, x_off, y_off, colours);
+    let elapsed = start.elapsed();
+    println!("Finished in {} milliseconds.", elapsed.as_millis());
 
-    let scale = 1.0;
-    let x_off = 0.0;
-    let y_off = 0.0;
+    let mut window =
+        Window::new("Mandelbrot Set", WIDTH, HEIGHT, WindowOptions::default()).unwrap();
+    window.update_with_buffer(&buf, WIDTH, HEIGHT).unwrap();
 
-    event_loop.run(move |event, _, control_flow| {
-        if let Event::RedrawRequested(_) = event {
-            // TODO: Draw Mandelbrot
-            draw_mandelbrot(pixels.get_frame(), scale, x_off, y_off);
-            // world.draw(pixels.get_frame());
-            if pixels
-                .render()
-                .map_err(|e| eprintln!("pixels.render() failed: {}", e))
-                .is_err()
-            {
-                *control_flow = ControlFlow::Exit;
-                return;
-            }
-        }
-    });
+    thread::sleep(Duration::from_millis(2000));
 }
 
-fn draw_mandelbrot(frame: &mut [u8], scale: f64, x_off: f64, y_off: f64) {
+fn from_rgb(r: u8, g: u8, b: u8) -> u32 {
+    let (r, g, b) = (r as u32, g as u32, b as u32);
+    r << 16 | g << 8 | b
+}
+
+fn draw_mandelbrot(
+    buffer: &mut [u32],
+    scale: f64,
+    x_off: f64,
+    y_off: f64,
+    colours: [u32; MAX_ITERS as usize + 1],
+) {
+    let mut iters = [0; WIDTH * HEIGHT];
+
+    for y in 0..HEIGHT {
+        let ci = y as f64 / scale + y_off;
+        for x in 0..WIDTH {
+            let cr = x as f64 / scale + x_off;
+
+            let mut zr = 0.0;
+            let mut zi = 0.0;
+
+            let mut n: usize = 0;
+
+            for _ in 0..MAX_ITERS {
+                let new_zr = zr * zr - zi * zi + cr;
+                let new_zi = zr * zi * 2.0 + ci;
+                zr = new_zr;
+                zi = new_zi;
+
+                let squared_abs = zr * zr + zi * zi;
+                if squared_abs >= 4.0 {
+                    break;
+                }
+                n += 1;
+            }
+
+            iters[y * WIDTH + x] = n;
+        }
+    }
+
+    for (i, pixel) in buffer.iter_mut().enumerate() {
+        *pixel = colours[iters[i]];
+    }
+}
+
+fn draw_mandelbrot_vectorized(
+    buffer: &mut [u32],
+    scale: f64,
+    x_off: f64,
+    y_off: f64,
+    colours: [u32; MAX_ITERS as usize + 1],
+) {
     let mut iters = [0; WIDTH * HEIGHT];
 
     let scale_vec = f64x4::splat(scale);
     let x_off_vec = f64x4::splat(x_off);
 
-    let start = Instant::now();
-
-    for row in 0..HEIGHT {
-        let mut n = i64x4::splat(1);
-        let mut done_mask = mask64x4::splat(false);
+    for y in 0..HEIGHT {
+        let ci = f64x4::splat(y as f64 / scale + y_off);
 
         for x in (0..WIDTH).step_by(4) {
+            let mut n = i64x4::splat(0);
             let xs = f64x4::from_array([x as f64, (x + 1) as f64, (x + 2) as f64, (x + 3) as f64]);
-            let mut zr = xs / scale_vec + x_off_vec;
-            let mut zi = f64x4::splat(row as f64 / scale + y_off);
+            let cr = xs / scale_vec + x_off_vec;
 
-            let cr = zr.clone();
-            let ci = zi.clone();
+            let mut zr = f64x4::splat(0.0);
+            let mut zi = f64x4::splat(0.0);
 
             for _ in 0..MAX_ITERS {
                 // Square z and add c
-                let zr_new = zr * zr - zi * zi + cr;
-                let zi_new = f64x4::splat(2.0) * zr * zi + ci;
+                let new_zr = zr * zr - zi * zi + cr;
+                let new_zi = f64x4::splat(2.0) * zr * zi + ci;
+                zr = new_zr;
+                zi = new_zi;
 
                 // Check if absolute value is less than 2
-                let squared_abs = zr_new * zr_new + zi_new * zi_new;
-                let now_done = squared_abs >= f64x4::splat(4.0);
-                done_mask |= now_done;
+                let squared_abs = zr * zr + zi * zi;
+
+                // True means we need to increment
+                let not_diverged = squared_abs.lanes_lt(f64x4::splat(4.0));
 
                 // Increment n by one
-                let mut to_add = i64x4::splat(1);
-                to_add &= done_mask.to_int();
+                let to_add = i64x4::splat(1) & not_diverged.to_int();
+
                 n += to_add;
 
-                // Check if all done
-                let reached_max = n.lanes_ge(i64x4::splat(MAX_ITERS as i64));
-                done_mask |= reached_max;
-
-                zr = zr_new;
-                zi = zi_new;
+                // If all diverged
+                if not_diverged.to_int().reduce_min() == 0 {
+                    break;
+                }
             }
 
             // Save calculated values in iters array
-            iters[row * WIDTH + x] = n[0];
-            iters[row * WIDTH + x + 1] = n[1];
-            iters[row * WIDTH + x + 2] = n[2];
-            iters[row * WIDTH + x + 3] = n[3];
+            iters[y * WIDTH + x] = n[0] as usize;
+            iters[y * WIDTH + x + 1] = n[1] as usize;
+            iters[y * WIDTH + x + 2] = n[2] as usize;
+            iters[y * WIDTH + x + 3] = n[3] as usize;
         }
     }
 
-    for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
-        let n = iters[i];
-        // Convert n to rgb
-        let brightness: u8 = (n / MAX_ITERS as i64) as u8 * 255;
-        pixel.copy_from_slice(&[brightness, brightness, brightness, 0xFF]);
+    for (i, pixel) in buffer.iter_mut().enumerate() {
+        *pixel = colours[iters[i]];
     }
-
-    let elapsed = start.elapsed();
-    println!("Finished in {} milliseconds.", elapsed.as_millis());
 }
